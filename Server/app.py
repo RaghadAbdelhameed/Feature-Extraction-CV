@@ -23,6 +23,7 @@ def process_harris():
         return jsonify({"error": "No selected file"}), 400
 
     # 2. Get parameters from the frontend (with defaults just in case)
+    method = request.form.get('method', 'harris')
     block_size = int(request.form.get('block_size', 3))
     k_value = float(request.form.get('k', 0.04))
     threshold = float(request.form.get('threshold_ratio', 0.1))
@@ -36,6 +37,7 @@ def process_harris():
         # 4. Run the isolated Harris logic
         result_data = run_harris_detector(
             image_path=temp_path,
+            method=method,
             block_size=block_size,
             k=k_value,
             threshold_ratio=threshold
