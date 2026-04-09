@@ -4,6 +4,8 @@ import base64
 from scipy.signal import convolve2d
 from PIL import Image
 import io
+from scipy import ndimage
+from scipy.spatial import KDTree
 
 def load_image(image_path):
     """
@@ -127,3 +129,87 @@ def detect_harris_corners(image: np.ndarray, num_corners: int = 50) -> list:
         corners.append((row, col))
     
     return corners
+
+# ========== SIFT UTILITY FUNCTIONS ==========
+def gaussian_blur(image, sigma):
+    """Fast Gaussian blur using scipy's optimized function."""
+    if sigma == 0:
+        return image
+    return ndimage.gaussian_filter(image, sigma, mode='reflect')
+
+def build_gaussian_pyramid(image, sigma=1.6, num_octaves=None, num_levels=5):
+    """Builds a Gaussian pyramid useful for scale-space extrema detection."""
+    if num_octaves is None:
+        num_octaves = int(np.log2(min(image.shape))) - 2
+    
+    pyramid = []
+    k = 2 ** (1.0/3)
+    
+    for octave in range(num_octaves):
+        octave_images = []
+        if octave == 0:
+            current = image
+        else:
+            current = pyramid[octave-1][3][::2, ::2]
+        
+        octave_images.append(gaussian_blur(current, sigma))
+        
+        for level in range(1, num_levels):
+            sigma_current = sigma * (k ** level)
+            octave_images.append(gaussian_blur(octave_images[0], sigma_current))
+        
+        pyramid.append(octave_images)
+    return pyramid
+
+def compute_dog_pyramid(gaussian_pyramid):
+    """Computes Difference of Gaussians (DoG) from a Gaussian pyramid."""
+    dog_pyramid = []
+    for octave in gaussian_pyramid:
+        dog_octave = [octave[i+1] - octave[i] for i in range(len(octave)-1)]
+        dog_pyramid.append(dog_octave)
+    return dog_pyramid
+
+def remove_duplicates_fast(keypoints, distance_threshold=5):
+    """Fast duplicate removal using spatial grid hashing."""
+    if len(keypoints) <= 1: return keypoints
+    keypoints_sorted = sorted(keypoints, key=lambda x: x['contrast'], reverse=True)
+    grid = {}
+    unique_keypoints = []
+
+    for kp in keypoints_sorted:
+        cell_x, cell_y = int(kp['x'] // distance_threshold), int(kp['y'] // distance_threshold)
+        is_duplicate = False
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                cell = (cell_x + dx, cell_y + dy)
+                if cell in grid:
+                    for existing in grid[cell]:
+                        if np.hypot(kp['x'] - existing['x'], kp['y'] - existing['y']) < distance_threshold:
+                            is_duplicate = True; break
+                if is_duplicate: break
+            if is_duplicate: break
+        
+        if not is_duplicate:
+            unique_keypoints.append(kp)
+            grid.setdefault((cell_x, cell_y), []).append(kp)
+    return unique_keypoints
+
+def match_features(desc1, desc2, ratio_threshold=0.75):
+    """Generic feature matcher using KDTree and Lowe's ratio test."""
+    if not desc1 or not desc2: return []
+    tree = KDTree(desc2)
+    distances, indices = tree.query(desc1, k=2)
+    return [(i, idx[0]) for i, (d, idx) in enumerate(zip(distances, indices)) if d[0] < ratio_threshold * d[1]]
+
+def draw_keypoints_opencv(image, keypoints):
+    """Generic keypoint drawing utility for OpenCV."""
+    output_image = image.copy()
+    if len(output_image.shape) == 2:
+        output_image = cv2.cvtColor(output_image, cv2.COLOR_GRAY2BGR)
+
+    for kp in keypoints:
+        center = (int(kp['y']), int(kp['x']))
+        radius = max(1, int(kp['scale']))
+        cv2.circle(output_image, center, radius, (0, 255, 0), 1)
+        cv2.circle(output_image, center, 1, (0, 0, 255), -1)
+    return output_image

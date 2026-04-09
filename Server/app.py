@@ -5,13 +5,16 @@ import uuid
 import numpy as np
 import cv2
 import sys
+import time
 
 # Import our standalone function
 from harris_detector import run_harris_detector
+# Import SIFT functions 
+from sift_detector import detect_sift_features_fast
 # Import NCC functions
 from ncc_matcher import ncc_matching_robust, detect_and_match_features, visualize_match_result
 # Import utils
-from utils import base64_to_image_array, image_array_to_base64, detect_harris_corners
+from utils import base64_to_image_array, image_array_to_base64, detect_harris_corners, draw_keypoints_opencv, encode_image_to_base64
 
 app = Flask(__name__)
 CORS(app) 
@@ -67,6 +70,55 @@ def process_harris():
         if os.path.exists(temp_path):
             os.remove(temp_path)
         return jsonify({"error": str(e)}), 500
+    
+@app.route('/api/sift', methods=['POST'])
+def process_sift():
+    # 1. Ensure an image was uploaded
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image provided'}), 400
+    
+    # 2. Extract parameters from the frontend request (with safe fallbacks)
+    try:
+        contrast_thr = float(request.form.get('contrast_thr', 0.04))
+        edge_thr = float(request.form.get('edge_thr', 10.0))
+        sigma = float(request.form.get('sigma', 1.6))
+    except ValueError:
+        return jsonify({'error': 'Invalid parameter types provided'}), 400
+
+    # 3. Read the image file from the request
+    file = request.files['image']
+    file_bytes = np.frombuffer(file.read(), np.uint8)
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+    if img is None:
+        return jsonify({'error': 'Invalid image file'}), 400
+
+    # 4. Process the image using your SIFT algorithm
+    start_time = time.time()
+    
+    # Run the core SIFT detection
+    keypoints, descriptors = detect_sift_features_fast(
+        img, 
+        contrast_threshold=contrast_thr, 
+        edge_threshold=edge_thr, 
+        sigma=sigma
+    )
+    
+    end_time = time.time()
+    computation_time = end_time - start_time
+
+    # 5. Draw the resulting keypoints onto the original image
+    result_img = draw_keypoints_opencv(img, keypoints)
+
+    # 6. Convert the processed image back to a Base64 string for the frontend
+    result_base64 = encode_image_to_base64(result_img, ext='.jpg')
+
+    # 7. Send the successful response back to React
+    return jsonify({
+        'result_image_base64': result_base64,
+        'computation_time_seconds': computation_time,
+        'total_keypoints': len(keypoints)
+    })
 
 # ========== NCC ENDPOINTS ==========
 
