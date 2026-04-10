@@ -15,6 +15,10 @@ from ncc_matcher     import (
     ncc_template_match,
     visualize_matches,
 )
+from ssd_matcher import (
+    detect_and_match_ssd,
+    visualize_ssd_matches,
+)
 from utils import (
     base64_to_image_array,
     image_array_to_base64,
@@ -134,23 +138,39 @@ def ncc_feature_match():
         img2 = base64_to_image_array(data['image2'])
         log(f"img1={img1.shape}  img2={img2.shape}")
 
-        result = detect_and_match_features(
-            img1, img2,
-            patch_size=patch_size,
-            num_keypoints=num_keypoints,
-            ratio_thresh=ratio_thresh,
-            method=method,
-        )
+        # ── Route to the correct matcher ───────────────────────────────── #
+        if method == 'ssd':
+            result = detect_and_match_ssd(
+                img1, img2,
+                patch_size=patch_size,
+                num_keypoints=num_keypoints,
+                ratio_thresh=ratio_thresh,
+            )
+            viz = visualize_ssd_matches(
+                img1, img2,
+                [(m['idx1'], m['idx2']) for m in result['matches']],
+                result['keypoints1'],
+                result['keypoints2'],
+                result['descriptors1'],
+                result['descriptors2'],
+            )
+        else:
+            result = detect_and_match_features(
+                img1, img2,
+                patch_size=patch_size,
+                num_keypoints=num_keypoints,
+                ratio_thresh=ratio_thresh,
+               
+            )
+            viz = visualize_matches(
+                img1, img2,
+                [(m['idx1'], m['idx2']) for m in result['matches']],
+                result['keypoints1'],
+                result['keypoints2'],
+                result['descriptors1'],
+                result['descriptors2'],
+            )
 
-        # Build visualisation (needs descriptors for colour mapping)
-        viz = visualize_matches(
-            img1, img2,
-            [(m['idx1'], m['idx2']) for m in result['matches']],
-            result['keypoints1'],
-            result['keypoints2'],
-            result['descriptors1'],
-            result['descriptors2'],
-        )
         viz_b64 = image_array_to_base64(viz)
 
         log(f"SUCCESS: {result['num_matches']} matches  "

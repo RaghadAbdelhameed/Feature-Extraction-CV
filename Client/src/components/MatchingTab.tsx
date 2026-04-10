@@ -252,18 +252,7 @@ const MatchingTab = () => {
               <p className="font-semibold text-xs text-green-600">
                 ✓ {matches.length} {method.toUpperCase()} matches
               </p>
-              {bestScore !== null && (
-                <p className="text-muted-foreground">
-                  Best score:{" "}
-                  <span className="text-primary font-mono">{bestScore.toFixed(4)}</span>
-                </p>
-              )}
-              {meanScore !== null && (
-                <p className="text-muted-foreground">
-                  Mean score:{" "}
-                  <span className="text-primary font-mono">{meanScore.toFixed(4)}</span>
-                </p>
-              )}
+              
             </div>
           )}
         </div>

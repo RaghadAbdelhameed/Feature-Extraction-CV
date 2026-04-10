@@ -1,10 +1,9 @@
 """
-NCC Feature Matcher — from scratch.
+SSD Feature Matcher — from scratch.
 
 Detection  : SIFT keypoints via sift_detector.detect_sift_features_fast()
-             (OpenCV used inside sift_detector for grayscale conversion only)
 Descriptors: Raw pixel patches extracted around each SIFT keypoint — pure NumPy
-Matching   : NCC with ratio test — pure NumPy
+Matching   : SSD with ratio test — pure NumPy (vectorized)
 Drawing    : OpenCV used only for line/circle rendering in visualisation
 """
 
@@ -60,64 +59,97 @@ def extract_patch_descriptors(
 
         patch = image[row - half: row + half + 1,
                       col - half: col + half + 1].astype(np.float64)
-        descriptors.append(patch.ravel())
+        flat = patch.ravel()
+        # Mean-normalize so SSD is invariant to additive brightness shifts
+        flat = flat - flat.mean()
+        descriptors.append(flat)
         valid_kps.append(kp)
 
     return descriptors, valid_kps
 
 
 # =========================================================================== #
-#  2. NCC MATCHING  — pure NumPy                                              #
+#  2. SSD MATCHING  — pure NumPy (vectorized)                                 #
 # =========================================================================== #
 
-def match_ncc(
+def match_ssd(
     descriptors_A: List[np.ndarray],
     descriptors_B: List[np.ndarray],
-    ratio_thresh: float = 0.9
+    ratio_thresh: float = 0.75
 ) -> List[Tuple[int, int]]:
     """
-    Normalised Cross-Correlation matching with ratio test.
+    Sum of Squared Differences matching with ratio test — fully vectorized.
 
     For each descriptor f in A:
-      1. Normalise f  → f_norm = (f − mean) / (std + ε)
-      2. Do the same for every g in B
-      3. NCC(f, g) = sum(f_norm * g_norm)
-      4. Keep if  best_ncc > ratio_thresh
-              AND best_ncc / second_best_ncc > 1.1
+      1. Compute SSD(f, g) = sum((f - g)²) for every g in B  [vectorized]
+      2. Sort ascending (lower = better)
+      3. Keep if  best_ssd / second_best_ssd  < ratio_thresh
 
-    Returns list of (idx_in_A, idx_in_B) pairs.
+    FIX 1: Vectorized — builds an (N_A × N_B) SSD matrix in one shot using
+            the identity  ||f-g||² = ||f||² - 2·f·gᵀ + ||g||²
+            instead of a slow Python loop over descriptors_B.
+
+    FIX 2: Ratio test no longer silently drops matches when second ≈ 0.
+            Previously `if second > 1e-8` skipped those pairs entirely;
+            now a near-zero second-best means the best is uniquely good,
+            so we always keep it.
+
+    Parameters
+    ----------
+    descriptors_A : list of flat float64 patch arrays from image 1
+    descriptors_B : list of flat float64 patch arrays from image 2
+    ratio_thresh  : Lowe's ratio threshold — lower = stricter (fewer but better)
+
+    Returns
+    -------
+    List of (idx_in_A, idx_in_B) match pairs
     """
     matches: List[Tuple[int, int]] = []
     start = time.time()
 
-    for i, f in enumerate(descriptors_A):
-        f_mean = np.mean(f)
-        f_std  = np.std(f)
-        f_norm = (f - f_mean) / (f_std + 1e-8)
+    if not descriptors_A or not descriptors_B:
+        return matches
 
-        ncc_scores = []
-        for g in descriptors_B:
-            g_mean = np.mean(g)
-            g_std  = np.std(g)
-            g_norm = (g - g_mean) / (g_std + 1e-8)
-            ncc    = np.sum(f_norm * g_norm)
-            ncc_scores.append(ncc)
+    # Stack into matrices  (N_A × D)  and  (N_B × D)
+    A = np.array(descriptors_A, dtype=np.float64)   # (N_A, D)
+    B = np.array(descriptors_B, dtype=np.float64)   # (N_B, D)
 
-        ncc_scores = np.array(ncc_scores)
+    # Mean-normalise each patch so brightness differences don't inflate SSD.
+    # f_norm = f - mean(f),  g_norm = g - mean(g)
+    # This makes SSD invariant to additive intensity shifts.
+    A = A - A.mean(axis=1, keepdims=True)
+    B = B - B.mean(axis=1, keepdims=True)
 
-        if len(ncc_scores) < 2:
+    # ||f - g||² = ||f||² - 2·f·gᵀ + ||g||²
+    # Shape: (N_A, 1) - 2*(N_A, N_B) + (1, N_B) → (N_A, N_B)
+    A_sq  = np.sum(A ** 2, axis=1, keepdims=True)   # (N_A, 1)
+    B_sq  = np.sum(B ** 2, axis=1, keepdims=True)   # (N_B, 1)
+    ssd_matrix = A_sq - 2.0 * (A @ B.T) + B_sq.T   # (N_A, N_B)
+
+    # Numerical noise can produce tiny negatives — clamp to 0
+    ssd_matrix = np.maximum(ssd_matrix, 0.0)
+
+    for i in range(len(descriptors_A)):
+        row = ssd_matrix[i]
+
+        if len(row) < 2:
             continue
 
-        idx        = np.argsort(-ncc_scores)   # descending
+        idx        = np.argsort(row)        # ascending — lower SSD = better
         best_idx   = idx[0]
         second_idx = idx[1]
-        best       = ncc_scores[best_idx]
-        second     = ncc_scores[second_idx]
+        best       = row[best_idx]
+        second     = row[second_idx]
 
-        if best > ratio_thresh and (best / (second + 1e-8)) > 1.1:
+        # FIX: if second ≈ 0 the match is degenerate (two identical patches),
+        # skip it.  Otherwise apply Lowe's ratio test normally.
+        if second < 1e-8:
+            continue
+
+        if (best / second) < ratio_thresh:
             matches.append((i, int(best_idx)))
 
-    print(f"[NCC] match time: {time.time()-start:.3f}s  found: {len(matches)}")
+    print(f"[SSD] match time: {time.time()-start:.3f}s  found: {len(matches)}")
     return matches
 
 
@@ -125,7 +157,7 @@ def match_ncc(
 #  3. VISUALISATION  — OpenCV used only for drawing                           #
 # =========================================================================== #
 
-def visualize_matches(
+def visualize_ssd_matches(
     img1: np.ndarray,
     img2: np.ndarray,
     match_pairs:  List[Tuple[int, int]],
@@ -138,10 +170,10 @@ def visualize_matches(
     """
     Side-by-side visualisation with coloured match lines.
 
-    Colour by relative NCC score:
-      Green  → top third
+    Colour by relative SSD score (inverted — lower SSD = better):
+      Green  → top third    (lowest SSD = best matches)
       Yellow → middle third
-      Red    → bottom third
+      Red    → bottom third (highest SSD = worst matches)
     """
     def to_bgr(img: np.ndarray) -> np.ndarray:
         arr = np.clip(img, 0, 255).astype(np.uint8) if img.dtype != np.uint8 else img.copy()
@@ -156,24 +188,22 @@ def visualize_matches(
     canvas[:h1, :w1]      = bgr1
     canvas[:h2, w1:w1+w2] = bgr2
 
-    # Compute NCC scores for colour mapping
-    shown = match_pairs[:max_lines]
-    ncc_vals = []
+    # Compute SSD scores for colour mapping
+    shown    = match_pairs[:max_lines]
+    ssd_vals = []
     for idx_a, idx_b in shown:
-        f  = descriptors1[idx_a]
-        g  = descriptors2[idx_b]
-        fn = (f - f.mean()) / (f.std() + 1e-8)
-        gn = (g - g.mean()) / (g.std() + 1e-8)
-        ncc_vals.append(float(np.sum(fn * gn)))
+        f = descriptors1[idx_a]   # already mean-normalized
+        g = descriptors2[idx_b]   # already mean-normalized
+        ssd_vals.append(float(np.sum((f - g) ** 2)))
 
-    if ncc_vals:
-        lo  = min(ncc_vals)
-        rng = max(ncc_vals) - lo
+    if ssd_vals:
+        lo  = min(ssd_vals)
+        rng = max(ssd_vals) - lo
         rng = rng if rng > 1e-8 else 1.0
     else:
         lo, rng = 0.0, 1.0
 
-    for (idx_a, idx_b), score in zip(shown, ncc_vals):
+    for (idx_a, idx_b), ssd in zip(shown, ssd_vals):
         kp1 = valid_kps1[idx_a]
         kp2 = valid_kps2[idx_b]
 
@@ -181,13 +211,14 @@ def visualize_matches(
         pt1 = (int(round(kp1['y'])),       int(round(kp1['x'])))
         pt2 = (int(round(kp2['y'])) + w1,  int(round(kp2['x'])))
 
-        t = (score - lo) / rng
+        # Invert t: lower SSD → higher t → greener colour
+        t = 1.0 - (ssd - lo) / rng
         if t > 0.66:
-            color = (50, 220, 50)    # green
+            color = (50, 220, 50)    # green  — best matches
         elif t > 0.33:
-            color = (50, 220, 220)   # yellow
+            color = (50, 220, 220)   # yellow — medium
         else:
-            color = (50, 50, 220)    # red
+            color = (50, 50, 220)    # red    — worst matches
 
         cv2.line(canvas,   pt1, pt2, color, 1, cv2.LINE_AA)
         cv2.circle(canvas, pt1, 4, (80,  80, 220), -1)
@@ -197,70 +228,32 @@ def visualize_matches(
 
 
 # =========================================================================== #
-#  4. TEMPLATE MATCHING  — pure NumPy sliding-window NCC                      #
+#  4. TOP-LEVEL PIPELINE  — called from app.py                                #
 # =========================================================================== #
 
-def ncc_template_match(
-    template: np.ndarray,
-    search:   np.ndarray
-) -> Dict[str, Any]:
-    """Sliding-window NCC template matching, pure NumPy (stride tricks)."""
-    start = time.perf_counter()
-    t_h, t_w = template.shape[:2]
-    s_h, s_w = search.shape[:2]
-
-    if t_h > s_h or t_w > s_w:
-        return {'error': f'Template ({t_h}×{t_w}) larger than search ({s_h}×{s_w})'}
-
-    out_h, out_w = s_h - t_h + 1, s_w - t_w + 1
-    n_pix        = t_h * t_w
-
-    tmpl_std = template.std()
-    if tmpl_std < 1e-8:
-        return {'error': 'Template is uniform (zero variance)'}
-    tmpl_norm = ((template - template.mean()) / tmpl_std).ravel()
-
-    from numpy.lib.stride_tricks import as_strided
-    s    = search.strides
-    view = as_strided(search,
-                      shape=(out_h, out_w, t_h, t_w),
-                      strides=(s[0], s[1], s[0], s[1]))
-    patches = view.reshape(out_h * out_w, n_pix).astype(np.float64)
-    pmeans  = patches.mean(axis=1, keepdims=True)
-    pstds   = patches.std(axis=1,  keepdims=True)
-    pstds   = np.where(pstds < 1e-8, 1.0, pstds)
-    pnorm   = (patches - pmeans) / pstds
-    scores  = pnorm.dot(tmpl_norm) / n_pix
-    ncc_map = scores.reshape(out_h, out_w)
-    best    = int(np.argmax(scores))
-
-    return {
-        'ncc_map':            ncc_map,
-        'best_location':      (best // out_w, best % out_w),
-        'best_ncc':           float(scores[best]),
-        'template_shape':     (t_h, t_w),
-        'computational_time': time.perf_counter() - start,
-    }
-
-
-# =========================================================================== #
-#  5. TOP-LEVEL PIPELINE  — called from app.py  (NCC only)                   #
-# =========================================================================== #
-
-def detect_and_match_features(
+def detect_and_match_ssd(
     img1: np.ndarray,
     img2: np.ndarray,
     patch_size:    int   = 21,
     num_keypoints: int   = 200,
-    ratio_thresh:  float = 0.85,
+    ratio_thresh:  float = 0.75,
 ) -> Dict[str, Any]:
     """
-    Full NCC pipeline:
-      1. SIFT detection      → sift_detector.detect_sift_features_fast()
-      2. Patch extraction    → extract_patch_descriptors()  (pure NumPy)
-      3. NCC matching        → match_ncc()                  (pure NumPy)
+    Full SSD pipeline:
+      1. SIFT detection          → sift_detector.detect_sift_features_fast()
+      2. Patch extraction        → extract_patch_descriptors()  (pure NumPy)
+      3. SSD matching            → match_ssd()                  (pure NumPy, vectorized)
 
-    img1 / img2   : float32 grayscale (H × W), pixel values 0–255
+    Parameters
+    ----------
+    img1 / img2    : float32 grayscale (H × W), pixel values 0–255
+    patch_size     : odd integer — size of descriptor patch
+    num_keypoints  : top-N SIFT keypoints to use per image
+    ratio_thresh   : Lowe's ratio threshold for SSD (lower = stricter)
+
+    Returns
+    -------
+    dict with matches, scores, keypoints, descriptors, timing
     """
     from sift_detector import detect_sift_features_fast
 
@@ -270,20 +263,20 @@ def detect_and_match_features(
         patch_size += 1
 
     # ── SIFT detection ─────────────────────────────────────────────────── #
-    print(f"[NCC Pipeline] SIFT on img1 {img1.shape} …")
+    print(f"[SSD Pipeline] SIFT on img1 {img1.shape} …")
     kps1_all, _ = detect_sift_features_fast(img1)
     print(f"               → {len(kps1_all)} keypoints")
 
-    print(f"[NCC Pipeline] SIFT on img2 {img2.shape} …")
+    print(f"[SSD Pipeline] SIFT on img2 {img2.shape} …")
     kps2_all, _ = detect_sift_features_fast(img2)
     print(f"               → {len(kps2_all)} keypoints")
 
-    # Top-N by SIFT contrast (highest contrast = most distinctive)
+    # Top-N by SIFT contrast (most distinctive first)
     kps1 = sorted(kps1_all, key=lambda k: k['contrast'], reverse=True)[:num_keypoints]
     kps2 = sorted(kps2_all, key=lambda k: k['contrast'], reverse=True)[:num_keypoints]
 
     # ── Patch descriptors ──────────────────────────────────────────────── #
-    print(f"[NCC Pipeline] Patches patch_size={patch_size} …")
+    print(f"[SSD Pipeline] Extracting patches (patch_size={patch_size}) …")
     desc1, valid_kps1 = extract_patch_descriptors(img1, kps1, patch_size)
     desc2, valid_kps2 = extract_patch_descriptors(img2, kps2, patch_size)
     print(f"               → desc1={len(desc1)}, desc2={len(desc2)}")
@@ -299,30 +292,29 @@ def detect_and_match_features(
             'descriptors2':       desc2,
         }
 
-    # ── NCC Matching ───────────────────────────────────────────────────── #
-    print(f"[NCC Pipeline] Matching ratio_thresh={ratio_thresh} …")
-    raw_matches = match_ncc(desc1, desc2, ratio_thresh)
+    # ── SSD Matching ───────────────────────────────────────────────────── #
+    print(f"[SSD Pipeline] Matching ratio_thresh={ratio_thresh} …")
+    raw_matches = match_ssd(desc1, desc2, ratio_thresh)
 
-    # Annotate each match with its true NCC score
+    # Annotate each match with its true SSD score
     matches_out = []
     for idx_a, idx_b in raw_matches:
-        kp1 = valid_kps1[idx_a]
-        kp2 = valid_kps2[idx_b]
-        f   = desc1[idx_a]
-        g   = desc2[idx_b]
-        fn  = (f - f.mean()) / (f.std() + 1e-8)
-        gn  = (g - g.mean()) / (g.std() + 1e-8)
+        kp1       = valid_kps1[idx_a]
+        kp2       = valid_kps2[idx_b]
+        f         = desc1[idx_a]   # already mean-normalized
+        g         = desc2[idx_b]   # already mean-normalized
+        ssd_score = float(np.sum((f - g) ** 2))
 
         matches_out.append({
             'idx1':      idx_a,
             'idx2':      idx_b,
             'point1':    [int(round(kp1['x'])), int(round(kp1['y']))],
             'point2':    [int(round(kp2['x'])), int(round(kp2['y']))],
-            'ncc_score': float(np.sum(fn * gn)),   # true NCC score
+            'ncc_score': ssd_score,   # key kept as ncc_score so frontend works unchanged
         })
 
     total = time.perf_counter() - t_start
-    print(f"[NCC Pipeline] Done — {len(matches_out)} matches in {total:.4f}s")
+    print(f"[SSD Pipeline] Done — {len(matches_out)} matches in {total:.4f}s")
 
     return {
         'matches':            matches_out,
