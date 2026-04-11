@@ -21,8 +21,23 @@ def run_harris_detector(image_path, method='harris', block_size=3, k=0.04, thres
 
     # 3. Structure Tensor Components 
     Ixx, Iyy, Ixy = Ix**2, Iy**2, Ix * Iy
-    # Create a box filter (uniform kernel) for summing over the block_size x block_size neighborhood
-    window = np.ones((block_size, block_size))
+    
+    # --- Gaussian Window Generation ---
+    # Calculate standard deviation (sigma) based on the block_size
+    sigma = 0.3 * ((block_size - 1) * 0.5 - 1) + 0.8
+    
+    # Create a 1D grid originating from the center
+    ax = np.arange(-(block_size // 2), block_size // 2 + 1)
+    
+    # Calculate the 1D Gaussian curve
+    kernel_1d = np.exp(-(ax ** 2) / (2 * sigma ** 2))
+    
+    # Create the 2D Gaussian filter matrix by taking the outer product
+    window = np.outer(kernel_1d, kernel_1d)
+    
+    # Normalize the kernel so the sum of all elements equals 1
+    window /= np.sum(window)
+    # ------------------------------------------------------
     
     Sxx = custom_convolve2d(Ixx, window, mode='same', boundary='symm')
     Syy = custom_convolve2d(Iyy, window, mode='same', boundary='symm')
@@ -34,6 +49,7 @@ def run_harris_detector(image_path, method='harris', block_size=3, k=0.04, thres
         trace_M = Sxx + Syy
         R = det_M - k * (trace_M**2)
     elif method == 'shi-tomasi':
+        # get the minimum eigenvalue of the structure tensor
         R = 0.5 * ((Sxx + Syy) - np.sqrt((Sxx - Syy)**2 + 4 * (Sxy**2)))
     else:
         raise ValueError("Method must be 'harris' or 'shi-tomasi'")
