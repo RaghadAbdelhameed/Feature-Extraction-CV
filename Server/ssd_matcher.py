@@ -24,27 +24,14 @@ def extract_patch_descriptors(
     keypoints: List[Dict],
     patch_size: int = 21
 ) -> Tuple[List[np.ndarray], List[Dict]]:
-    """
-    Extract a raw pixel patch around every SIFT keypoint as its descriptor.
-
-    SIFT keypoint dict convention:  'x' = row,  'y' = col
-
-    Parameters
-    ----------
-    image      : 2-D float32 grayscale  (H × W),  pixel values 0–255
-    keypoints  : list of dicts with 'x' (row) and 'y' (col)
-    patch_size : odd integer square patch size
-
-    Returns
-    -------
-    descriptors : list of flat float64 arrays  (patch_size² each)
-    valid_kps   : matching subset of the input keypoints (border-safe only)
-    """
+   # Ensure patch size is always odd
+   #  so the keypoint sits exactly at the center
     if patch_size % 2 == 0:
         patch_size += 1
+    # Half-width used to compute the patch boundaries around each keypoint    
     half = patch_size // 2
     h, w = image.shape[:2]
-
+   #define descriptors and a valid kps list to append to them next
     descriptors: List[np.ndarray] = []
     valid_kps:   List[Dict]       = []
 
@@ -52,15 +39,22 @@ def extract_patch_descriptors(
         row = int(round(kp['x']))   # SIFT: x = row
         col = int(round(kp['y']))   # SIFT: y = col
 
-        # Discard keypoints whose patch would fall outside the image
+        # Skip keypoints too close to the image border 
+        # — their patch would go out of bounds
         if (row - half < 0 or row + half >= h or
                 col - half < 0 or col + half >= w):
             continue
-
+        # Crop the square patch centered on the keypoint
+        #btkhly el kepoint fel nos w 7waleha el patch
         patch = image[row - half: row + half + 1,
                       col - half: col + half + 1].astype(np.float64)
+        
+        # Flatten the 2D patch into a 1D descriptor vector
         flat = patch.ravel()
         # Mean-normalize so SSD is invariant to additive brightness shifts
+        #ex: one image is slightly darker 
+        #without mean normalization the ssd will assume they're different
+        #  even if it's the same photo with brightness difference
         flat = flat - flat.mean()
         descriptors.append(flat)
         valid_kps.append(kp)
@@ -77,51 +71,26 @@ def match_ssd(
     descriptors_B: List[np.ndarray],
     ratio_thresh: float = 0.75
 ) -> List[Tuple[int, int]]:
-    """
-    Sum of Squared Differences matching with ratio test — fully vectorized.
-
-    For each descriptor f in A:
-      1. Compute SSD(f, g) = sum((f - g)²) for every g in B  [vectorized]
-      2. Sort ascending (lower = better)
-      3. Keep if  best_ssd / second_best_ssd  < ratio_thresh
-
-    FIX 1: Vectorized — builds an (N_A × N_B) SSD matrix in one shot using
-            the identity  ||f-g||² = ||f||² - 2·f·gᵀ + ||g||²
-            instead of a slow Python loop over descriptors_B.
-
-    FIX 2: Ratio test no longer silently drops matches when second ≈ 0.
-            Previously `if second > 1e-8` skipped those pairs entirely;
-            now a near-zero second-best means the best is uniquely good,
-            so we always keep it.
-
-    Parameters
-    ----------
-    descriptors_A : list of flat float64 patch arrays from image 1
-    descriptors_B : list of flat float64 patch arrays from image 2
-    ratio_thresh  : Lowe's ratio threshold — lower = stricter (fewer but better)
-
-    Returns
-    -------
-    List of (idx_in_A, idx_in_B) match pairs
-    """
+    
     matches: List[Tuple[int, int]] = []
     start = time.time()
 
     if not descriptors_A or not descriptors_B:
         return matches
 
-    # Stack into matrices  (N_A × D)  and  (N_B × D)
+    # Stack descriptor lists into 2D matrices for vectorized operations
     A = np.array(descriptors_A, dtype=np.float64)   # (N_A, D)
     B = np.array(descriptors_B, dtype=np.float64)   # (N_B, D)
 
-    # Mean-normalise each patch so brightness differences don't inflate SSD.
-    # f_norm = f - mean(f),  g_norm = g - mean(g)
+    # Re-normalize each descriptor row to remove any remaining brightness bias
     # This makes SSD invariant to additive intensity shifts.
     A = A - A.mean(axis=1, keepdims=True)
     B = B - B.mean(axis=1, keepdims=True)
-
-    # ||f - g||² = ||f||² - 2·f·gᵀ + ||g||²
-    # Shape: (N_A, 1) - 2*(N_A, N_B) + (1, N_B) → (N_A, N_B)
+   
+    # Compute squared L2 norms for each descriptor
+    #Instead of computing (f - g)^2 directly, 
+    # I use ||f||² - 2f·gᵀ + ||g||², which is mathematically equivalent 
+    # but much faster using matrix operations (no python loop needed)
     A_sq  = np.sum(A ** 2, axis=1, keepdims=True)   # (N_A, 1)
     B_sq  = np.sum(B ** 2, axis=1, keepdims=True)   # (N_B, 1)
     ssd_matrix = A_sq - 2.0 * (A @ B.T) + B_sq.T   # (N_A, N_B)
@@ -129,12 +98,17 @@ def match_ssd(
     # Numerical noise can produce tiny negatives — clamp to 0
     ssd_matrix = np.maximum(ssd_matrix, 0.0)
 
+#"For each descriptor in image 1, we find the best and second-best match in image 2. 
+# If best/second < 0.75 the match is accepted. 
+# The idea is: a good match should be clearly better than the runner-up
+#   if two candidates are similarly close, the match is ambiguous and we reject it."
+
     for i in range(len(descriptors_A)):
         row = ssd_matrix[i]
 
         if len(row) < 2:
             continue
-
+        # Sort SSD scores ascending — index 0 is the best (lowest) match
         idx        = np.argsort(row)        # ascending — lower SSD = better
         best_idx   = idx[0]
         second_idx = idx[1]
@@ -145,8 +119,8 @@ def match_ssd(
         # skip it.  Otherwise apply Lowe's ratio test normally.
         if second < 1e-8:
             continue
-
-        if (best / second) < ratio_thresh:
+      #without this test we will get a lot of false matches 
+        if (best / second) < ratio_thresh: #0.75
             matches.append((i, int(best_idx)))
 
     print(f"[SSD] match time: {time.time()-start:.3f}s  found: {len(matches)}")
@@ -263,14 +237,16 @@ def detect_and_match_ssd(
         patch_size += 1
 
     # ── SIFT detection ─────────────────────────────────────────────────── #
-    print(f"[SSD Pipeline] SIFT on img1 {img1.shape} …")
+    
+    # Detect all SIFT keypoints in both images
+
     kps1_all, _ = detect_sift_features_fast(img1)
-    print(f"               → {len(kps1_all)} keypoints")
-
-    print(f"[SSD Pipeline] SIFT on img2 {img2.shape} …")
+    
     kps2_all, _ = detect_sift_features_fast(img2)
-    print(f"               → {len(kps2_all)} keypoints")
-
+    
+   # Keep only the top-N keypoints ranked by contrast 
+   # (most distinctive first)
+   # High contrast = more unique = better for matching
     # Top-N by SIFT contrast (most distinctive first)
     kps1 = sorted(kps1_all, key=lambda k: k['contrast'], reverse=True)[:num_keypoints]
     kps2 = sorted(kps2_all, key=lambda k: k['contrast'], reverse=True)[:num_keypoints]
