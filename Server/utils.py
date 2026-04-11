@@ -1,11 +1,42 @@
 import cv2
 import numpy as np
 import base64
-from scipy.signal import convolve2d
 from PIL import Image
 import io
 from scipy import ndimage
 from scipy.spatial import KDTree
+from numpy.lib.stride_tricks import sliding_window_view
+
+def custom_convolve2d(image, kernel, mode='same', boundary='symm'):
+    """
+    A NumPy-based implementation of 2D convolution to replace scipy.signal.convolve2d.
+    """
+    # 1. Flip the kernel horizontally and vertically. 
+    # Strict mathematical convolution requires a flipped kernel (unlike cross-correlation).
+    # This matches the exact behavior of scipy.signal.convolve2d.
+    k_flipped = np.flip(kernel)
+    
+    # 2. Determine the amount of padding needed based on the kernel size.
+    # Assuming odd-sized kernels (like 3x3 or 5x5).
+    pad_h = k_flipped.shape[0] // 2
+    pad_w = k_flipped.shape[1] // 2
+    
+    # 3. Apply symmetric padding to handle edge cases
+    if boundary == 'symm':
+        pad_mode = 'symmetric'
+    else:
+        pad_mode = 'constant'
+        
+    padded_image = np.pad(image, ((pad_h, pad_h), (pad_w, pad_w)), mode=pad_mode)
+    
+    # 4. Extract rolling windows of the exact shape as our kernel across the image
+    # This turns a (H, W) image into a (H, W, kernel_H, kernel_W) matrix of views.
+    windows = sliding_window_view(padded_image, window_shape=k_flipped.shape)
+    
+    # 5. Multiply the windows by the kernel and sum them up over the kernel axes
+    output = np.sum(windows * k_flipped, axis=(2, 3))
+    
+    return output
 
 def load_image(image_path):
     """
@@ -18,15 +49,46 @@ def load_image(image_path):
 
 def preprocess_for_gradients(image, apply_blur=True, blur_ksize=(5, 5)):
     """
-    Converts a BGR image to grayscale, applies optional smoothing, 
-    and normalizes pixel values to a 0.0 - 1.0 float range.
+    Converts a BGR image to grayscale from scratch, applies optional custom 
+    Gaussian smoothing, and normalizes pixel values to a 0.0 - 1.0 float range.
     """
-    gray_img = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
+    # --- 1. Grayscale Conversion ---
+    b = image[:, :, 0]
+    g = image[:, :, 1]
+    r = image[:, :, 2]
+    
+    # Apply the standard luminosity weights
+    gray_img = (0.114 * b) + (0.587 * g) + (0.299 * r)
+    
+    # --- 2. Gaussian Blur ---
     if apply_blur:
-        gray_img = cv2.GaussianBlur(gray_img, blur_ksize, 0)
+        kx, ky = blur_ksize
         
+        # Calculate standard deviation (sigma)
+        sigma_x = 0.3 * ((kx - 1) * 0.5 - 1) + 0.8
+        sigma_y = 0.3 * ((ky - 1) * 0.5 - 1) + 0.8
+        
+        # Create 1D grids
+        x = np.arange(-(kx // 2), kx // 2 + 1)
+        y = np.arange(-(ky // 2), ky // 2 + 1)
+        
+        # Calculate 1D Gaussian curves
+        kernel_x = np.exp(-(x ** 2) / (2 * sigma_x ** 2))
+        kernel_y = np.exp(-(y ** 2) / (2 * sigma_y ** 2))
+        
+        # Create the 2D Gaussian filter matrix
+        kernel_2d = np.outer(kernel_y, kernel_x)
+        
+        # Normalize the kernel
+        kernel_2d /= np.sum(kernel_2d)
+        
+        # Apply our custom convolution
+        gray_img = custom_convolve2d(gray_img, kernel_2d, mode='same', boundary='symm')
+        
+    # --- 3. Normalization ---
     gray_img_float = gray_img.astype(np.float64) / 255.0
+    
     return gray_img_float
 
 def compute_spatial_gradients(gray_img_float):
@@ -37,8 +99,8 @@ def compute_spatial_gradients(gray_img_float):
     Kx = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
     Ky = np.array([[-1, -2, -1], [ 0,  0,  0], [ 1,  2,  1]])
 
-    Ix = convolve2d(gray_img_float, Kx, mode='same', boundary='symm')
-    Iy = convolve2d(gray_img_float, Ky, mode='same', boundary='symm')
+    Ix = custom_convolve2d(gray_img_float, Kx, mode='same', boundary='symm')
+    Iy = custom_convolve2d(gray_img_float, Ky, mode='same', boundary='symm')
     
     return Ix, Iy
 
