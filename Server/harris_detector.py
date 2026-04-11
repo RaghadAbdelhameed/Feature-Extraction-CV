@@ -2,15 +2,21 @@ import numpy as np
 import cv2
 import time
 
-# Import the common functions from your utils file 
-from utils import load_image, preprocess_for_gradients, compute_spatial_gradients, encode_image_to_base64, custom_convolve2d
+# Import the common functions from your utils file
+from utils import (
+    load_image, 
+    preprocess_for_gradients, 
+    compute_spatial_gradients, 
+    encode_image_to_base64, 
+    apply_gaussian_filter
+)
 
 def run_harris_detector(image_path, method='harris', block_size=3, k=0.04, threshold_ratio=0.01):
     """
-    Self-contained Harris Corner Detector.
+    Self-contained Harris & Shi-Tomasi Corner Detector.
     Returns computation time, point count, and the output image as a Base64 string.
     """
-    # 1. Read and preprocess (Using Utils)
+    # 1. Read and preprocess (Using Utils - blur is automatically applied here)
     original_img = load_image(image_path)
     gray_img_float = preprocess_for_gradients(original_img, apply_blur=True)
     
@@ -22,26 +28,10 @@ def run_harris_detector(image_path, method='harris', block_size=3, k=0.04, thres
     # 3. Structure Tensor Components 
     Ixx, Iyy, Ixy = Ix**2, Iy**2, Ix * Iy
     
-    # --- Gaussian Window Generation ---
-    # Calculate standard deviation (sigma) based on the block_size
-    sigma = 0.3 * ((block_size - 1) * 0.5 - 1) + 0.8
-    
-    # Create a 1D grid originating from the center
-    ax = np.arange(-(block_size // 2), block_size // 2 + 1)
-    
-    # Calculate the 1D Gaussian curve
-    kernel_1d = np.exp(-(ax ** 2) / (2 * sigma ** 2))
-    
-    # Create the 2D Gaussian filter matrix by taking the outer product
-    window = np.outer(kernel_1d, kernel_1d)
-    
-    # Normalize the kernel so the sum of all elements equals 1
-    window /= np.sum(window)
-    # ------------------------------------------------------
-    
-    Sxx = custom_convolve2d(Ixx, window, mode='same', boundary='symm')
-    Syy = custom_convolve2d(Iyy, window, mode='same', boundary='symm')
-    Sxy = custom_convolve2d(Ixy, window, mode='same', boundary='symm')
+    # Apply the Gaussian window based on the block_size to aggregate the gradients
+    Sxx = apply_gaussian_filter(Ixx, kernel_size=block_size)
+    Syy = apply_gaussian_filter(Iyy, kernel_size=block_size)
+    Sxy = apply_gaussian_filter(Ixy, kernel_size=block_size)
 
     # 4. Corner Response
     if method == 'harris':
@@ -100,7 +90,6 @@ def run_harris_detector(image_path, method='harris', block_size=3, k=0.04, thres
         cv2.circle(output_img, (int(x), int(y)), radius=5, color=(0, 0, 255), thickness=-1)
 
     # 7. Convert the marked-up image to Base64 (Using Utils)
-    # The util function already formats it with "data:image/jpeg;base64,..."
     img_base64_string = encode_image_to_base64(output_img, ext='.jpg')
 
     # 8. Return exactly what the webapp needs

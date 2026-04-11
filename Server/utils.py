@@ -38,6 +38,29 @@ def custom_convolve2d(image, kernel, mode='same', boundary='symm'):
     
     return output
 
+def apply_gaussian_filter(matrix, kernel_size):
+    """
+    Generates a 2D Gaussian kernel and convolves it with the input matrix.
+    Can be used for both initial image smoothing and structure tensor integration.
+    """
+    # Calculate standard deviation (sigma) based on the kernel_size
+    sigma = 0.3 * ((kernel_size - 1) * 0.5 - 1) + 0.8
+    
+    # Create a 1D grid originating from the center
+    ax = np.arange(-(kernel_size // 2), kernel_size // 2 + 1)
+    
+    # Calculate the 1D Gaussian curve
+    kernel_1d = np.exp(-(ax ** 2) / (2 * sigma ** 2))
+    
+    # Create the 2D Gaussian filter matrix by taking the outer product
+    kernel_2d = np.outer(kernel_1d, kernel_1d)
+    
+    # Normalize the kernel so the sum of all elements equals 1
+    kernel_2d /= np.sum(kernel_2d)
+    
+    # Apply the convolution
+    return custom_convolve2d(matrix, kernel_2d, mode='same', boundary='symm')
+
 def load_image(image_path):
     """
     Safely reads an image from the given path.
@@ -61,30 +84,11 @@ def preprocess_for_gradients(image, apply_blur=True, blur_ksize=(5, 5)):
     # Apply the standard luminosity weights
     gray_img = (0.114 * b) + (0.587 * g) + (0.299 * r)
     
-    # --- 2. Gaussian Blur ---
+    # --- 2. Gaussian Blur (Using new reusable function) ---
     if apply_blur:
-        kx, ky = blur_ksize
-        
-        # Calculate standard deviation (sigma)
-        sigma_x = 0.3 * ((kx - 1) * 0.5 - 1) + 0.8
-        sigma_y = 0.3 * ((ky - 1) * 0.5 - 1) + 0.8
-        
-        # Create 1D grids
-        x = np.arange(-(kx // 2), kx // 2 + 1)
-        y = np.arange(-(ky // 2), ky // 2 + 1)
-        
-        # Calculate 1D Gaussian curves
-        kernel_x = np.exp(-(x ** 2) / (2 * sigma_x ** 2))
-        kernel_y = np.exp(-(y ** 2) / (2 * sigma_y ** 2))
-        
-        # Create the 2D Gaussian filter matrix
-        kernel_2d = np.outer(kernel_y, kernel_x)
-        
-        # Normalize the kernel
-        kernel_2d /= np.sum(kernel_2d)
-        
-        # Apply our custom convolution
-        gray_img = custom_convolve2d(gray_img, kernel_2d, mode='same', boundary='symm')
+        # Extract the integer size from the tuple (assuming a square kernel like (5, 5))
+        k_size = blur_ksize[0] if isinstance(blur_ksize, tuple) else blur_ksize
+        gray_img = apply_gaussian_filter(gray_img, kernel_size=k_size)
         
     # --- 3. Normalization ---
     gray_img_float = gray_img.astype(np.float64) / 255.0
@@ -94,7 +98,6 @@ def preprocess_for_gradients(image, apply_blur=True, blur_ksize=(5, 5)):
 def compute_spatial_gradients(gray_img_float):
     """
     Computes the X and Y image gradients using a 3x3 Sobel operator.
-    (Used heavily in Harris, Shi-Tomasi, and SIFT).
     """
     Kx = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
     Ky = np.array([[-1, -2, -1], [ 0,  0,  0], [ 1,  2,  1]])
