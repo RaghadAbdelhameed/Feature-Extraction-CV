@@ -10,6 +10,7 @@ import cv2
 
 from harris_detector import run_harris_detector
 from sift_detector   import detect_sift_features_fast
+from segmentation    import segment_image
 from ncc_matcher     import (
     detect_and_match_features,
     ncc_template_match,
@@ -125,7 +126,7 @@ def ncc_feature_match():
         patch_size    = int(data.get('patch_size',    21))
         num_keypoints = int(data.get('num_keypoints', 200))
         ratio_thresh  = float(data.get('ratio_thresh', 0.85))
-        method        = str(data.get('method', 'ncc')).lower()   # 'ncc' or 'ssd'
+        method        = str(data.get('method', 'ncc')).lower()
 
         if patch_size % 2 == 0:
             patch_size += 1
@@ -133,12 +134,10 @@ def ncc_feature_match():
         log(f"method={method}, patch_size={patch_size}, "
             f"num_keypoints={num_keypoints}, ratio_thresh={ratio_thresh}")
 
-        # Decode — float32 grayscale, pixel range 0–255
         img1 = base64_to_image_array(data['image1'])
         img2 = base64_to_image_array(data['image2'])
         log(f"img1={img1.shape}  img2={img2.shape}")
 
-        # ── Route to the correct matcher ───────────────────────────────── #
         if method == 'ssd':
             result = detect_and_match_ssd(
                 img1, img2,
@@ -160,7 +159,6 @@ def ncc_feature_match():
                 patch_size=patch_size,
                 num_keypoints=num_keypoints,
                 ratio_thresh=ratio_thresh,
-               
             )
             viz = visualize_matches(
                 img1, img2,
@@ -218,7 +216,6 @@ def ncc_template_match_endpoint():
         ncc_u8  = ((ncc_map - mn) / (mx - mn + 1e-8) * 255).astype(np.uint8)
         ncc_b64 = image_array_to_base64(ncc_u8)
 
-        # Draw bounding box
         si       = np.stack([search_img.astype(np.uint8)] * 3, axis=-1)
         r, c     = result['best_location']
         t_h, t_w = result['template_shape']
@@ -246,6 +243,51 @@ def ncc_template_match_endpoint():
 
 
 # =========================================================================== #
+#  SEGMENTATION (Part b)                                                       #
+# =========================================================================== #
+
+@app.route('/api/segmentation', methods=['POST'])
+def process_segmentation():
+    if 'image' not in request.files:
+        return jsonify({"error": "No image file provided"}), 400
+
+    file = request.files['image']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+
+    method     = request.form.get('method', 'kmeans')
+    n_clusters = request.form.get('n_clusters', 4)
+    threshold  = request.form.get('threshold', 15.0)
+    seed_row   = request.form.get('seed_row', None)
+    seed_col   = request.form.get('seed_col', None)
+
+    file_bytes = np.frombuffer(file.read(), np.uint8)
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    if img is None:
+        return jsonify({"error": "Invalid image file"}), 400
+
+    try:
+        params = {
+            "n_clusters": n_clusters,
+            "threshold":  threshold,
+            "seed_row":   seed_row,
+            "seed_col":   seed_col,
+        }
+        result_bgr, n_segments, elapsed = segment_image(img, method=method, params=params)
+        result_base64 = encode_image_to_base64(result_bgr, ext='.jpg')
+
+        return jsonify({
+            "result_image_base64":      result_base64,
+            "computation_time_seconds": elapsed,
+            "n_segments":               n_segments,
+        }), 200
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# =========================================================================== #
 #  HEALTH                                                                      #
 # =========================================================================== #
 
@@ -266,6 +308,7 @@ if __name__ == '__main__':
     print("  POST /api/sift")
     print("  POST /api/ncc/feature-match   (method: ncc | ssd)")
     print("  POST /api/ncc/template-match")
+    print("  POST /api/segmentation")
     print("  GET  /api/ncc/health")
     print("=" * 60 + "\n")
     app.run(debug=True, port=5000)
