@@ -1,9 +1,10 @@
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Crosshair, Fingerprint, GitCompare, Layers } from "lucide-react";
+import { Crosshair, Fingerprint, GitCompare, Layers, ScanLine } from "lucide-react";
 import HarrisTab from "@/components/HarrisTab";
 import SiftTab from "@/components/SiftTab";
 import MatchingTab from "@/components/MatchingTab";
 import SegmentationTab from "@/components/SegmentationTab";
+import ThresholdingTab from "@/components/ThresholdingTab";
 
 const Index = () => {
   return (
@@ -52,6 +53,13 @@ const Index = () => {
             <Layers className="w-3.5 h-3.5" />
             Segmentation
           </TabsTrigger>
+          <TabsTrigger
+            value="thresholding"
+            className="gap-1.5 text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:tab-active-glow"
+          >
+            <ScanLine className="w-3.5 h-3.5" />
+            Thresholding
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="harris" className="flex-1 min-h-0 mt-0">
@@ -65,6 +73,9 @@ const Index = () => {
         </TabsContent>
         <TabsContent value="segmentation" className="flex-1 min-h-0 mt-0">
           <SegmentationTab />
+        </TabsContent>
+        <TabsContent value="thresholding" className="flex-1 min-h-0 mt-0">
+          <ThresholdingTab />
         </TabsContent>
       </Tabs>
     </div>

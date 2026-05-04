@@ -7,6 +7,7 @@ from flask_cors import CORS
 import os, uuid, sys, time
 import numpy as np
 import cv2
+from thresholding_endpoint import register_thresholding
 
 from harris_detector import run_harris_detector
 from sift_detector   import detect_sift_features_fast
@@ -29,7 +30,7 @@ from utils import (
 
 app = Flask(__name__)
 CORS(app)
-
+register_thresholding(app)
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
