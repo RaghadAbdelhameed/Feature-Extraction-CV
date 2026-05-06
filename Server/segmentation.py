@@ -205,46 +205,51 @@ def run_agglomerative(image: np.ndarray, n_clusters: int = 4) -> tuple:
 # =========================================================================== #
 
 def run_mean_shift(image: np.ndarray,
-                   bandwidth: float = 30.0,
-                   max_iter: int = 15,
-                   tol: float = 1.0) -> tuple:
+                   bandwidth: float = 60.0,
+                   max_iter: int = 8,
+                   tol: float = 2.0) -> tuple:
     """
     Mean Shift from scratch.
-    - Downscales image heavily for speed
-    - Each pixel shifts toward the mean of pixels within bandwidth
-    - Converged points that are close together are merged into one cluster
+    - Downscales to 50px max for speed
+    - Fully vectorized shift step (no Python loop over pixels)
+    - Higher bandwidth = fewer, larger segments
     """
-    small = _resize_for_processing(image, max_side=80)
+    small = _resize_for_processing(image, max_side=50)
     h, w  = small.shape[:2]
     n_ch  = 1 if len(small.shape) == 2 else 3
     pixels = small.reshape(-1, n_ch).astype(np.float32)
     N = len(pixels)
 
-    # Each pixel is a seed that will shift
+    # Each pixel is a seed that shifts toward local mean
     points = pixels.copy()
+    bw_sq  = bandwidth ** 2
 
     for _ in range(max_iter):
+        # Fully vectorized: (N, N, D)
+        diff     = pixels[None, :, :] - points[:, None, :]   # (N, N, D)
+        dists_sq = np.sum(diff ** 2, axis=2)                  # (N, N)
+        in_win   = dists_sq <= bw_sq                          # (N, N) bool
+
         new_points = np.zeros_like(points)
-        # For each seed compute mean of all pixels within bandwidth
         for i in range(N):
-            diff     = pixels - points[i]                    # (N, D)
-            dists_sq = np.sum(diff ** 2, axis=1)             # (N,)
-            in_win   = dists_sq <= bandwidth ** 2
-            new_points[i] = pixels[in_win].mean(axis=0) if in_win.any() else points[i]
+            if in_win[i].any():
+                new_points[i] = pixels[in_win[i]].mean(axis=0)
+            else:
+                new_points[i] = points[i]
 
         shift  = float(np.max(np.linalg.norm(new_points - points, axis=1)))
         points = new_points
         if shift < tol:
             break
 
-    # Merge converged seeds that are within bandwidth/2 of each other
-    labels    = -np.ones(N, dtype=np.int32)
+    # Merge converged seeds within bandwidth/2 of each other
+    labels     = -np.ones(N, dtype=np.int32)
     cluster_id = 0
     for i in range(N):
         if labels[i] != -1:
             continue
         dists = np.linalg.norm(points - points[i], axis=1)
-        same  = dists <= bandwidth * 0.5
+        same  = dists <= bandwidth * 0.8
         labels[same] = cluster_id
         cluster_id += 1
 
